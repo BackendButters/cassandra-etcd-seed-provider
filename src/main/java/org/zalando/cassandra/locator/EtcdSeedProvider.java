@@ -9,6 +9,7 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import org.apache.cassandra.locator.SeedProvider;
+import org.codehaus.jackson.map.DeserializationConfig;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,64 @@ import java.util.concurrent.TimeUnit;
 
 public class EtcdSeedProvider implements SeedProvider {
     private static final Logger logger = LoggerFactory.getLogger(EtcdSeedProvider.class);
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final URL etcdUrl;
+
+    public EtcdSeedProvider(final Map<String, String> args) {
+        mapper.configure(DeserializationConfig.Feature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+        final Optional<String> url = Optional.fromNullable(args.get("url"));
+        try {
+            if (url.isPresent()) {
+                etcdUrl = new URL(url.get());
+            } else {
+                logger.warn("Seed provider doesn't have any parameters");
+                etcdUrl = new URL(System.getenv("ETCD_URL"));
+            }
+        } catch (MalformedURLException e) {
+            logger.error("Invalid etcd url", e);
+            throw new AssertionError(e);
+        }
+    }
+
+
+
+    private LoadingCache<URL, List<InetAddress>> seeds = CacheBuilder.newBuilder()
+            .expireAfterWrite(5L, TimeUnit.SECONDS)
+            .build(
+                    new CacheLoader<URL, List<InetAddress>>() {
+                        public List<InetAddress> load(final URL url) {
+                            try {
+                                final ResultNode result = mapper.readValue(etcdUrl, ResultNode.class);
+                                logger.debug("Refreshing seed list ...");
+                                return buildSeedList(result);
+                            } catch (java.io.IOException e) {
+                                logger.error("Failed to get seed list from etcd", e);
+                            }
+                            return ImmutableList.of();
+                        }
+                    });
+
+
+
+    public EtcdSeedProvider(final URL etcdUrl) {
+        this.etcdUrl = etcdUrl;
+    }
+
+    public List<InetAddress> getSeeds() {
+        return seeds.getUnchecked(etcdUrl);
+    }
+
+    private List<InetAddress> buildSeedList(final ResultNode result) {
+        if (result == null) {
+            return ImmutableList.of();
+        }
+
+        return FluentIterable.from(result.getNode().getNodes())
+                .transform(KEYNODE_TO_INETADDRESS)
+                .filter(Predicates.notNull())
+                .toList();
+    }
 
     private final String hostnameFromDescriptor(final String value) {
         if (value.startsWith("{")) {
@@ -54,57 +113,4 @@ public class EtcdSeedProvider implements SeedProvider {
         }
     };
 
-    private LoadingCache<URL, List<InetAddress>> seeds = CacheBuilder.newBuilder()
-            .expireAfterWrite(5L, TimeUnit.SECONDS)
-            .build(
-                    new CacheLoader<URL, List<InetAddress>>() {
-                        public List<InetAddress> load(final URL url) {
-                            try {
-                                final ResultNode result = mapper.readValue(etcdUrl, ResultNode.class);
-                                logger.debug("Refreshing seed list ...");
-                                return buildSeedList(result);
-                            } catch (java.io.IOException e) {
-                                logger.error("Failed to get seed list from etcd", e);
-                            }
-                            return ImmutableList.of();
-                        }
-                    });
-
-
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final URL etcdUrl;
-
-    public EtcdSeedProvider(final Map<String, String> args) {
-        final Optional<String> url = Optional.fromNullable(args.get("url"));
-        try {
-            if (url.isPresent()) {
-                etcdUrl = new URL(url.get());
-            } else {
-                logger.warn("Seed provider doesn't have any parameters");
-                etcdUrl = new URL(System.getenv("ETCD_URL"));
-            }
-        } catch (MalformedURLException e) {
-            logger.error("Invalid etcd url", e);
-            throw new AssertionError(e);
-        }
-    }
-
-    public EtcdSeedProvider(final URL etcdUrl) {
-        this.etcdUrl = etcdUrl;
-    }
-
-    public List<InetAddress> getSeeds() {
-        return seeds.getUnchecked(etcdUrl);
-    }
-
-    private List<InetAddress> buildSeedList(final ResultNode result) {
-        if (result == null) {
-            return ImmutableList.of();
-        }
-
-        return FluentIterable.from(result.getNode().getNodes())
-                .transform(KEYNODE_TO_INETADDRESS)
-                .filter(Predicates.notNull())
-                .toList();
-    }
 }
